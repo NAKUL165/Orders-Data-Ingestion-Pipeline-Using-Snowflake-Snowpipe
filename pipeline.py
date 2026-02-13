@@ -1,5 +1,22 @@
+/*
+=====================================================
+AWS Snowpipe Auto-Ingest Project
+Architecture:
+S3 → SNS → SQS → Snowflake Notification Integration → Snowpipe → Table
+
+Before running:
+1. Replace <ACCOUNT_ID>
+2. Replace <SNOWPIPE_ROLE>
+3. Replace <YOUR_BUCKET_NAME>
+4. Replace <FOLDER_PATH>
+5. Replace <REGION>
+6. Replace <SQS_QUEUE_NAME>
+7. Add External ID from DESC INTEGRATION into IAM Trust Policy
+=====================================================
+*/
+
 -- =========================================
--- 🔹 USE ACCOUNTADMIN ROLE
+-- 🔹 USE ROLE
 -- =========================================
 USE ROLE ACCOUNTADMIN;
 
@@ -10,13 +27,14 @@ CREATE OR REPLACE DATABASE snowpipe_dev_aws;
 USE DATABASE snowpipe_dev_aws;
 
 -- =========================================
--- 🔹 CREATE TARGET TABLE
+-- 🔹 CREATE TABLE
 -- =========================================
-CREATE OR REPLACE TABLE seller_data (
-    seller_id TEXT,
-    seller_zip_code_prefix INTEGER,
-    seller_city TEXT,
-    seller_state TEXT
+CREATE OR REPLACE TABLE orders_Datalz (
+    order_id INT,
+    product VARCHAR(20),
+    quantity INT,
+    order_status VARCHAR(30),
+    order_date DATE
 );
 
 -- =========================================
@@ -38,18 +56,18 @@ ENABLED = TRUE
 STORAGE_AWS_ROLE_ARN = 'arn:aws:iam::<ACCOUNT_ID>:role/<SNOWPIPE_ROLE>'
 STORAGE_ALLOWED_LOCATIONS = ('s3://<YOUR_BUCKET_NAME>/<FOLDER_PATH>/');
 
--- Run this to get EXTERNAL ID
+-- Get External ID for IAM Trust Policy
 DESC INTEGRATION s3_integration;
 
 -- =========================================
--- 🔹 CREATE EXTERNAL STAGE
+-- 🔹 CREATE STAGE
 -- =========================================
 CREATE OR REPLACE STAGE s3_stage
 URL = 's3://<YOUR_BUCKET_NAME>/<FOLDER_PATH>/'
 STORAGE_INTEGRATION = s3_integration
 FILE_FORMAT = csv_format;
 
--- Verify files
+-- Check files in stage
 LIST @s3_stage;
 
 -- =========================================
@@ -61,7 +79,7 @@ ENABLED = TRUE
 AWS_SQS_QUEUE_ARN = 'arn:aws:sqs:<REGION>:<ACCOUNT_ID>:<SQS_QUEUE_NAME>'
 AWS_IAM_ROLE_ARN = 'arn:aws:iam::<ACCOUNT_ID>:role/<SNOWPIPE_ROLE>';
 
--- Run this to get EXTERNAL ID
+-- Get External ID for IAM Trust Policy
 DESC INTEGRATION aws_sqs_notification_int;
 
 -- =========================================
@@ -71,8 +89,9 @@ CREATE OR REPLACE PIPE s3_to_snowflake_pipe
 AUTO_INGEST = TRUE
 INTEGRATION = aws_sqs_notification_int
 AS
-COPY INTO seller_data
-FROM @s3_stage;
+COPY INTO orders_Datalz
+FROM @s3_stage
+FILE_FORMAT = (FORMAT_NAME = csv_format);
 
 -- =========================================
 -- 🔹 CHECK PIPE STATUS
@@ -85,17 +104,17 @@ SELECT SYSTEM$PIPE_STATUS('s3_to_snowflake_pipe');
 ALTER PIPE s3_to_snowflake_pipe REFRESH;
 
 -- =========================================
--- 🔹 CHECK DATA
+-- 🔹 VERIFY DATA
 -- =========================================
-SELECT * FROM seller_data;
+SELECT * FROM orders_Datalz;
 
 -- =========================================
--- 🔹 LOAD HISTORY
+-- 🔹 CHECK LOAD HISTORY
 -- =========================================
 SELECT *
 FROM TABLE(
   INFORMATION_SCHEMA.COPY_HISTORY(
-    TABLE_NAME => 'SELLER_DATA',
+    TABLE_NAME => 'ORDERS_DATALZ',
     START_TIME => DATEADD('hour', -1, CURRENT_TIMESTAMP())
   )
 );
