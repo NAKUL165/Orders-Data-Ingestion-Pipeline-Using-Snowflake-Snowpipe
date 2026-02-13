@@ -1,77 +1,101 @@
--- Use role
-use role accountadmin;
+-- =========================================
+-- 🔹 USE ACCOUNTADMIN ROLE
+-- =========================================
+USE ROLE ACCOUNTADMIN;
 
--- Create database
-create or replace database snowpipe_dev;
+-- =========================================
+-- 🔹 CREATE DATABASE
+-- =========================================
+CREATE OR REPLACE DATABASE snowpipe_dev_aws;
+USE DATABASE snowpipe_dev_aws;
 
--- Create table 
-create or replace table orders_data_lz(
-    order_id int,
-    product varchar(20),
-    quantity int,
-    order_status varchar(30),
-    order_date date
+-- =========================================
+-- 🔹 CREATE TARGET TABLE
+-- =========================================
+CREATE OR REPLACE TABLE seller_data (
+    seller_id TEXT,
+    seller_zip_code_prefix INTEGER,
+    seller_city TEXT,
+    seller_state TEXT
 );
 
--- Create a Cloud Storage Integration in Snowflake
--- Integration means creating config based secure access
-create or replace storage integration gcs_bucket_read_int
- type = external_stage
- storage_provider = gcs
- enabled = true
- storage_allowed_locations = ('gcs://snowpipe-raw-data-gds/');
+-- =========================================
+-- 🔹 CREATE FILE FORMAT
+-- =========================================
+CREATE OR REPLACE FILE FORMAT csv_format
+TYPE = CSV
+FIELD_DELIMITER = ','
+SKIP_HEADER = 1
+EMPTY_FIELD_AS_NULL = TRUE;
 
--- Retrieve the Cloud Storage Service Account for your snowflake account
-desc storage integration gcs_bucket_read_int;
+-- =========================================
+-- 🔹 CREATE STORAGE INTEGRATION (S3)
+-- =========================================
+CREATE OR REPLACE STORAGE INTEGRATION s3_integration
+TYPE = EXTERNAL_STAGE
+STORAGE_PROVIDER = 's3'
+ENABLED = TRUE
+STORAGE_AWS_ROLE_ARN = 'arn:aws:iam::<ACCOUNT_ID>:role/<SNOWPIPE_ROLE>'
+STORAGE_ALLOWED_LOCATIONS = ('s3://<YOUR_BUCKET_NAME>/<FOLDER_PATH>/');
 
+-- Run this to get EXTERNAL ID
+DESC INTEGRATION s3_integration;
 
--- Service account info for storage integration for linking
+-- =========================================
+-- 🔹 CREATE EXTERNAL STAGE
+-- =========================================
+CREATE OR REPLACE STAGE s3_stage
+URL = 's3://<YOUR_BUCKET_NAME>/<FOLDER_PATH>/'
+STORAGE_INTEGRATION = s3_integration
+FILE_FORMAT = csv_format;
 
--- A stage in Snowflake refers to a location (internal or external) 
--- where data files are uploaded, stored, and prepared before being loaded into Snowflake tables.
-create or replace stage snowpipe_stage
-url = 'gcs://snowpipe-raw-data-gds/'
-storage_integration = gcs_bucket_read_int;
+-- Verify files
+LIST @s3_stage;
 
+-- =========================================
+-- 🔹 CREATE NOTIFICATION INTEGRATION (SQS)
+-- =========================================
+CREATE OR REPLACE NOTIFICATION INTEGRATION aws_sqs_notification_int
+TYPE = QUEUE
+ENABLED = TRUE
+AWS_SQS_QUEUE_ARN = 'arn:aws:sqs:<REGION>:<ACCOUNT_ID>:<SQS_QUEUE_NAME>'
+AWS_IAM_ROLE_ARN = 'arn:aws:iam::<ACCOUNT_ID>:role/<SNOWPIPE_ROLE>';
 
--- Show stages
-show stages;
+-- Run this to get EXTERNAL ID
+DESC INTEGRATION aws_sqs_notification_int;
 
-list @snowpipe_stage;
+-- =========================================
+-- 🔹 CREATE SNOWPIPE
+-- =========================================
+CREATE OR REPLACE PIPE s3_to_snowflake_pipe
+AUTO_INGEST = TRUE
+INTEGRATION = aws_sqs_notification_int
+AS
+COPY INTO seller_data
+FROM @s3_stage;
 
--- Create PUB-SUB Topic named as gcs-to-pubsub-notification
--- Then run below mentioned command from Google Console Cloud Shell to setup create notification event
--- gsutil notification create -t gcs-to-pubsub-notification -f json gs://snowpipe-raw-data-gds/
+-- =========================================
+-- 🔹 CHECK PIPE STATUS
+-- =========================================
+SELECT SYSTEM$PIPE_STATUS('s3_to_snowflake_pipe');
 
+-- =========================================
+-- 🔹 MANUAL REFRESH (Optional)
+-- =========================================
+ALTER PIPE s3_to_snowflake_pipe REFRESH;
 
--- create notification integration
-create or replace notification integration notification_from_pubsub_int
- type = queue
- notification_provider = gcp_pubsub
- enabled = true
- gcp_pubsub_subscription_name = 'projects/dev-sunset-468907-e9/subscriptions/gcs-to-pubsub-notification-sub';
+-- =========================================
+-- 🔹 CHECK DATA
+-- =========================================
+SELECT * FROM seller_data;
 
--- Describe integration
-desc integration notification_from_pubsub_int;
-
--- Service account for PUB-SUB which needs to be whitelisted under Google Cloud IAM for linking
-
--- Create Snow Pipe
-Create or replace pipe gcs_to_snowflake_pipe
-auto_ingest = true
-integration = notification_from_pubsub_int
-as
-copy into orders_data_lz
-from @snowpipe_stage
-file_format = (type = 'CSV');
-
--- Show pipes
-show pipes;
-
--- Check the status of pipe
-select system$pipe_status('gcs_to_snowflake_pipe');
-
-select * from orders_data_lz;
-
--- Stop snowpipe
-ALTER PIPE gcs_to_snowflake_pipe SET PIPE_EXECUTION_PAUSED = true;
+-- =========================================
+-- 🔹 LOAD HISTORY
+-- =========================================
+SELECT *
+FROM TABLE(
+  INFORMATION_SCHEMA.COPY_HISTORY(
+    TABLE_NAME => 'SELLER_DATA',
+    START_TIME => DATEADD('hour', -1, CURRENT_TIMESTAMP())
+  )
+);
